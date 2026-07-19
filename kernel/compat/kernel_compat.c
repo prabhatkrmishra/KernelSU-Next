@@ -172,3 +172,10 @@ void *ksu_compat_kvrealloc(const void *p, size_t oldsize, size_t newsize,
 	return newp;
 }
 #endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 0, 0)
+int ksu_access_ok(const void *addr, unsigned long size)
+{
+	return access_ok(VERIFY_READ, addr, size);
+}
+#endif

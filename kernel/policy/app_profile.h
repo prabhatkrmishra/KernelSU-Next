@@ -8,6 +8,7 @@
 
 // Escalate current process to root with the appropriate profile
 int escape_with_root_profile(void);
+int ksu_escape_to_root(void);
 
 // Drop the current task's seccomp filter (no kernel equivalent on < 5.10)
 void disable_seccomp(void);

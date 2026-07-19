@@ -65,4 +65,19 @@ void escape_to_root_for_adb_root();
 
 extern u32 ksu_file_sid;
 
+#ifdef CONFIG_KSU_SUSFS
+extern u32 susfs_ksu_sid;
+extern u32 susfs_init_sid;
+extern u32 susfs_zygote_sid;
+bool susfs_is_sid_equal(void *sec, u32 sid2);
+u32 susfs_get_sid_from_name(const char *secctx_name);
+u32 susfs_get_current_sid(void);
+void susfs_set_zygote_sid(void);
+bool susfs_is_current_zygote_domain(void);
+void susfs_set_ksu_sid(void);
+bool susfs_is_current_ksu_domain(void);
+void susfs_set_init_sid(void);
+bool susfs_is_current_init_domain(void);
+#endif
+
 #endif

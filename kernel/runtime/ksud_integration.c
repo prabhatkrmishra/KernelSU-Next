@@ -179,6 +179,11 @@ bool __maybe_unused ksu_vfs_read_hook = true;
 bool ksu_input_hook __read_mostly = true;
 bool ksu_execveat_hook __read_mostly = true;
 
+#ifdef CONFIG_KSU_SUSFS_SUS_SU
+bool ksu_devpts_hook = false;
+bool susfs_is_sus_su_ready = false;
+#endif
+
 #define MAX_ARG_STRINGS 0x7FFFFFFF
 
 static const char __user *get_user_arg_ptr(struct user_arg_ptr argv, int nr)
@@ -384,6 +389,10 @@ int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
 				task_work_add(init_task, &on_post_fs_data_cb, TWA_RESUME);
 			rcu_read_unlock();
 			first_zygote = false;
+#ifdef CONFIG_KSU_SUSFS_SUS_SU
+			susfs_is_sus_su_ready = true;
+			pr_info("susfs: sus_su is ready\n");
+#endif
 			stop_execve_hook();
 		}
 	}

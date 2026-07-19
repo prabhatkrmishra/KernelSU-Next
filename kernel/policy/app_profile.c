@@ -275,3 +275,8 @@ void __init ksu_app_profile_init(void)
     pr_info("seccomp_filter_release has_call_to_spin_lock = %d\n", has_call_to_spin_lock);
 #endif
 }
+
+int ksu_escape_to_root(void)
+{
+	return escape_with_root_profile();
+}
