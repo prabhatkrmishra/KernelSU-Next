@@ -263,3 +263,87 @@ void escape_to_root_for_adb_root(void)
     }
     commit_creds(cred);
 }
+
+#ifdef CONFIG_KSU_SUSFS
+u32 susfs_ksu_sid __read_mostly = 0;
+u32 susfs_init_sid __read_mostly = 0;
+u32 susfs_zygote_sid __read_mostly = 0;
+
+static void susfs_set_sid(const char *secctx_name, u32 *out_sid)
+{
+	int err;
+	if (!secctx_name || !out_sid) {
+		pr_err("secctx_name || out_sid is NULL\n");
+		return;
+	}
+	err = security_secctx_to_secid(secctx_name, strlen(secctx_name), out_sid);
+	if (err) {
+		pr_err("failed setting sid for '%s', err: %d\n", secctx_name, err);
+		return;
+	}
+	pr_info("sid '%u' is set for secctx_name '%s'\n", *out_sid, secctx_name);
+}
+
+void susfs_set_zygote_sid(void)
+{
+	susfs_set_sid("u:r:zygote:s0", &susfs_zygote_sid);
+}
+
+bool susfs_is_current_zygote_domain(void)
+{
+	if (susfs_zygote_sid)
+		return current_sid() == susfs_zygote_sid;
+	return is_zygote(current_cred());
+}
+
+void susfs_set_ksu_sid(void)
+{
+	susfs_set_sid(KERNEL_SU_CONTEXT, &susfs_ksu_sid);
+}
+
+bool susfs_is_current_ksu_domain(void)
+{
+	if (susfs_ksu_sid)
+		return current_sid() == susfs_ksu_sid;
+	return is_ksu_domain();
+}
+
+void susfs_set_init_sid(void)
+{
+	susfs_set_sid(INIT_CONTEXT, &susfs_init_sid);
+}
+
+bool susfs_is_current_init_domain(void)
+{
+	if (susfs_init_sid)
+		return current_sid() == susfs_init_sid;
+	return is_init(current_cred());
+}
+
+bool susfs_is_sid_equal(void *sec, u32 sid2)
+{
+	struct task_security_struct *tsec = (struct task_security_struct *)sec;
+	if (!tsec)
+		return false;
+	return tsec->sid == sid2;
+}
+
+u32 susfs_get_sid_from_name(const char *secctx_name)
+{
+	u32 out_sid = 0;
+	int err;
+	if (!secctx_name)
+		return 0;
+	err = security_secctx_to_secid(secctx_name, strlen(secctx_name), &out_sid);
+	if (err) {
+		pr_err("failed getting sid from secctx_name: %s, err: %d\n", secctx_name, err);
+		return 0;
+	}
+	return out_sid;
+}
+
+u32 susfs_get_current_sid(void)
+{
+	return current_sid();
+}
+#endif

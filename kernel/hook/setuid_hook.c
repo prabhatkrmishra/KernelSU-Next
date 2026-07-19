@@ -27,6 +27,13 @@
 #include "feature/kernel_umount.h"
 #include "compat/kernel_compat.h"
 
+#ifdef CONFIG_KSU_SUSFS
+#include <linux/susfs_def.h>
+extern u32 susfs_zygote_sid;
+extern bool susfs_is_sid_equal(void *sec, u32 sid2);
+extern bool susfs_is_umount_for_zygote_system_process_enabled;
+#endif
+
 extern void disable_seccomp(struct task_struct *tsk);
 
 static void ksu_install_manager_fd_tw_func(struct callback_head *cb)
@@ -42,6 +49,19 @@ int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
     uid_t old_uid = current_uid().val;
 
     pr_debug("handle_setresuid from %d to %d\n", old_uid, new_uid);
+
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+    {
+        const struct cred *old_cred = get_current_cred();
+        bool is_zygote_child = old_cred && susfs_is_sid_equal(old_cred->security, susfs_zygote_sid);
+        put_cred(old_cred);
+        if (likely(is_zygote_child) && unlikely(new_uid < 10000 && new_uid >= 1000)) {
+            if (susfs_is_umount_for_zygote_system_process_enabled) {
+                goto out_ksu_handle_umount;
+            }
+        }
+    }
+#endif
 
     if (unlikely(is_uid_manager(new_uid))) {
 
@@ -85,8 +105,18 @@ int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 #ifdef KSU_KPROBES_HOOK
 		ksu_clear_task_tracepoint_flag_if_needed(current);
 #endif
+#ifdef CONFIG_KSU_SUSFS
+		if (is_appuid(new_uid)) {
+			task_lock(current);
+			current->susfs_task_state |= TASK_STRUCT_NON_ROOT_USER_APP_PROC;
+			task_unlock(current);
+		}
+#endif
     }
 
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+out_ksu_handle_umount:
+#endif
     // Handle kernel umount
     ksu_handle_umount(old_uid, new_uid);
 

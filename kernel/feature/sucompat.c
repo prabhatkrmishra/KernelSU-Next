@@ -27,6 +27,7 @@
 #include "policy/allowlist.h"
 #include "policy/feature.h"
 #include "klog.h" // IWYU pragma: keep
+#include "selinux/selinux.h"
 #include "runtime/ksud.h"
 #include "compat/kernel_compat.h"
 #include "sucompat.h"
@@ -254,3 +255,43 @@ void __exit ksu_sucompat_exit()
 {
 	ksu_unregister_feature_handler(KSU_FEATURE_SU_COMPAT);
 }
+
+int ksu_handle_devpts(struct inode *inode)
+{
+	if (!current->mm) {
+		return 0;
+	}
+
+	uid_t uid = current_uid().val;
+	if (uid % 100000 < 10000) {
+		return 0;
+	}
+
+	if (!ksu_is_allow_uid(uid))
+		return 0;
+
+	if (ksu_file_sid) {
+		struct inode_security_struct *sec = selinux_inode(inode);
+		if (sec) {
+			sec->sid = ksu_file_sid;
+			inode->i_uid.val = 0;
+			inode->i_gid.val = 0;
+		}
+	}
+
+	return 0;
+}
+
+#ifdef CONFIG_KSU_SUSFS_SUS_SU
+extern bool ksu_devpts_hook;
+
+void ksu_susfs_enable_sus_su(void)
+{
+	ksu_devpts_hook = true;
+}
+
+void ksu_susfs_disable_sus_su(void)
+{
+	ksu_devpts_hook = false;
+}
+#endif

@@ -18,6 +18,11 @@
 #include "manager/manager_identity.h"
 #include "selinux/selinux.h"
 #include "infra/file_wrapper.h"
+
+#ifdef CONFIG_KSU_SUSFS
+extern void susfs_on_post_fs_data(void);
+extern int ksu_handle_susfs_ioctl(void __user *arg);
+#endif
 #include "hook/hook_manager.h"
 #include "policy/app_profile.h"
 #include "sulog/event.h"
@@ -109,6 +114,9 @@ static int do_report_event(void __user *arg)
 				pr_info("post-fs-data skipped (late load)\n");
 			} else {
 				pr_info("post-fs-data triggered\n");
+#ifdef CONFIG_KSU_SUSFS
+				susfs_on_post_fs_data();
+#endif
 				on_post_fs_data();
 			}
 		}
@@ -949,6 +957,14 @@ static const struct ksu_ioctl_cmd_map ksu_ioctl_handlers[] = {
         .handler = do_get_version_tag,
         .perm_check = manager_or_root
     },
+#ifdef CONFIG_KSU_SUSFS
+    {
+        .cmd = KSU_IOCTL_SUSFS_CMD,
+        .name = "SUSFS_CMD",
+        .handler = ksu_handle_susfs_ioctl,
+        .perm_check = only_root
+    },
+#endif
     {
         .cmd = 0,
         .name = NULL,

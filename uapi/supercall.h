@@ -195,4 +195,16 @@ struct ksu_get_sulog_fd_cmd {
 #define KSU_IOCTL_GET_HOOK_MODE _IOC(_IOC_READ, 'K', 98, 0)
 #define KSU_IOCTL_GET_VERSION_TAG _IOC(_IOC_READ, 'K', 99, 0)
 
+/*
+ * SUSFS ioctl interface
+ * Userspace passes a ksu_susfs_cmd with the SUSFS sub-command and __user pointers.
+ */
+struct ksu_susfs_cmd {
+	__u64 cmd;       /* Input: CMD_SUSFS_* from susfs_def.h */
+	__aligned_u64 buf;  /* Input: pointer to command-specific data (__user) */
+	__aligned_u64 ret;  /* Output: pointer to int return code (__user) */
+};
+
+static const __u32 KSU_IOCTL_SUSFS_CMD = _IOWR('K', 22, struct ksu_susfs_cmd);
+
 #endif

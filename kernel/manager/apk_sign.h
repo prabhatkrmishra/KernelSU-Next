@@ -3,7 +3,7 @@
 
 #include <linux/types.h>
 
-bool is_manager_apk(char *path);
+bool ksu_is_manager_apk(char *path);
 int get_pkg_from_apk_path(char *pkg, const char *path);
 
 #endif

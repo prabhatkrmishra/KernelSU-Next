@@ -272,6 +272,16 @@ out_flush:
 	smp_mb();
 	reset_avc_cache();
 #endif
+
+#ifdef CONFIG_KSU_SUSFS
+	{
+		struct policydb *susfs_db = get_policydb();
+		ksu_allow(susfs_db, "zygote", "labeledfs", "filesystem", "unmount");
+	}
+	susfs_set_init_sid();
+	susfs_set_ksu_sid();
+	susfs_set_zygote_sid();
+#endif
 }
 
 #define KSU_SEPOLICY_MAX_BATCH_SIZE (8U * 1024U * 1024U)

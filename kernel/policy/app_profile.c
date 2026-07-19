@@ -249,3 +249,8 @@ void escape_to_root_for_init(void) {
     setup_selinux(KERNEL_SU_CONTEXT, cred);
     commit_creds(cred);
 }
+
+int ksu_escape_to_root(void)
+{
+	return escape_with_root_profile();
+}
