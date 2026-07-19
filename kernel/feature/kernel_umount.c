@@ -95,6 +95,32 @@ static void try_umount(const char *mnt, int flags)
     ksu_umount_mnt(mnt, &path, flags);
 }
 
+void ksu_try_umount(const char *mnt, bool check_mnt, int flags, uid_t uid)
+{
+#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
+	extern bool susfs_is_log_enabled __read_mostly;
+	if (susfs_is_log_enabled) {
+		pr_info("susfs: umounting '%s' for uid: %d\n", mnt, uid);
+	}
+#endif
+	try_umount(mnt, flags);
+}
+
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+void susfs_try_umount_all(uid_t uid)
+{
+	extern void susfs_try_umount(uid_t target_uid);
+	susfs_try_umount(uid);
+	ksu_try_umount("/system", true, 0, uid);
+	ksu_try_umount("/system_ext", true, 0, uid);
+	ksu_try_umount("/vendor", true, 0, uid);
+	ksu_try_umount("/product", true, 0, uid);
+	ksu_try_umount("/odm", true, 0, uid);
+	ksu_try_umount("/data/adb/modules", false, MNT_DETACH, uid);
+	ksu_try_umount("/debug_ramdisk", true, MNT_DETACH, uid);
+}
+#endif
+
 struct umount_tw {
 	struct callback_head cb;
 };
