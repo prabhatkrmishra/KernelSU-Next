@@ -29,6 +29,36 @@ struct uid_data {
 	char package[KSU_MAX_PACKAGE_NAME];
 };
 
+static struct uid_data *parse_packages_list_line(char *line)
+{
+	struct uid_data *data;
+	char *tmp;
+	char *package;
+	char *uid;
+	u32 res;
+
+	if (!line || !*line)
+		return NULL;
+
+	tmp = line;
+	package = strsep(&tmp, " ");
+	uid = strsep(&tmp, " ");
+	if (!uid || !package)
+		return NULL;
+
+	if (kstrtou32(uid, 10, &res))
+		return NULL;
+
+	data = kzalloc(sizeof(struct uid_data), GFP_KERNEL);
+	if (!data)
+		return NULL;
+
+	data->uid = res;
+	memcpy(data->package, package, KSU_MAX_PACKAGE_NAME - 1);
+	data->package[KSU_MAX_PACKAGE_NAME - 1] = '\0';
+	return data;
+}
+
 static void crown_manager(const char *apk, struct list_head *uid_data)
 {
 	char pkg[KSU_MAX_PACKAGE_NAME];
@@ -276,48 +306,45 @@ static bool do_track_throne_core(bool prune_only)
 	struct list_head uid_list;
 	INIT_LIST_HEAD(&uid_list);
 
-	char chr = 0;
+	char chunk[4096];
+	char line[KSU_MAX_PACKAGE_NAME];
+	size_t line_len = 0;
 	loff_t pos = 0;
-	loff_t line_start = 0;
-	char buf[KSU_MAX_PACKAGE_NAME];
+	ssize_t n;
+	ssize_t i;
+	struct uid_data *data;
+
 	for (;;) {
-		ssize_t count = ksu_kernel_read_compat(fp, &chr, sizeof(chr), &pos);
-		if (count != sizeof(chr))
+		n = ksu_kernel_read_compat(fp, chunk, sizeof(chunk), &pos);
+		if (n <= 0)
 			break;
-		if (chr != '\n')
-			continue;
 
-		count = ksu_kernel_read_compat(fp, buf, sizeof(buf), &line_start);
+		for (i = 0; i < n; i++) {
+			char c = chunk[i];
 
-		struct uid_data *data = kzalloc(sizeof(struct uid_data), GFP_KERNEL);
-		if (!data) {
-			filp_close(fp, 0);
-			goto out;
+			if (c == '\n') {
+				if (line_len) {
+					line[line_len] = '\0';
+					data = parse_packages_list_line(line);
+					if (data)
+						list_add_tail(&data->list, &uid_list);
+					line_len = 0;
+				}
+				continue;
+			}
+
+			if (line_len < sizeof(line) - 1)
+				line[line_len++] = c;
 		}
-
-		char *tmp = buf;
-		const char *delim = " ";
-		char *package = strsep(&tmp, delim);
-		char *uid = strsep(&tmp, delim);
-		if (!uid || !package) {
-			kfree(data);
-			pr_err("update_uid: package or uid is NULL!\n");
-			break;
-		}
-
-		u32 res;
-		if (kstrtou32(uid, 10, &res)) {
-			kfree(data);
-			pr_err("update_uid: uid parse err\n");
-			break;
-		}
-		data->uid = res;
-		memcpy(data->package, package, KSU_MAX_PACKAGE_NAME - 1);
-		data->package[KSU_MAX_PACKAGE_NAME - 1] = '\0';
-		list_add_tail(&data->list, &uid_list);
-		// reset line start
-		line_start = pos;
 	}
+
+	if (line_len) {
+		line[line_len] = '\0';
+		data = parse_packages_list_line(line);
+		if (data)
+			list_add_tail(&data->list, &uid_list);
+	}
+
 	filp_close(fp, 0);
 
 	// now update uid list
@@ -350,7 +377,6 @@ static bool do_track_throne_core(bool prune_only)
 prune:
 	// then prune the allowlist
 	ksu_prune_allowlist(is_uid_exist, &uid_list);
-out:
 	// free uid_list
 	list_for_each_entry_safe (np, n, &uid_list, list) {
 		list_del(&np->list);
