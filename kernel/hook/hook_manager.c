@@ -13,6 +13,7 @@
 #include "klog.h" // IWYU pragma: keep
 #include "hook_manager.h"
 #include "feature/sucompat.h"
+#include "feature/adb_root.h"
 #include "setuid_hook.h"
 #include "selinux/selinux.h"
 #include "compat/kernel_compat.h"
@@ -339,6 +340,7 @@ static void ksu_sys_enter_handler(void *data, struct pt_regs *regs, long id)
 					(const char __user **)&PT_REGS_PARM1(regs);
 				if (current->pid != 1 && is_init(current_cred())) {
 					ksu_handle_init_mark_tracker(filename_user);
+					ksu_adb_root_handle_execve(regs);
 				} else {
 					ksu_handle_execve_sucompat(filename_user, NULL, NULL);
 				}

@@ -39,6 +39,7 @@
 #include "ksud_boot.h"
 #include "selinux/selinux.h"
 #include "compat/kernel_compat.h"
+#include "feature/adb_root.h"
 
 static const char KERNEL_SU_RC[] =
 	"\n"
@@ -215,6 +216,20 @@ int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
 	filename = *filename_ptr;
 	if (IS_ERR(filename)) {
 		return 0;
+	}
+
+	/* adb root: rewrite envp to preload libadbroot.so when adbd is
+	 * exec'd. Only init-spawned processes (which fork adbd) may reach
+	 * this, otherwise any app could exec a file named "adbd" and get
+	 * escalated to the ksu domain.
+	 */
+	if (envp && current->pid != 1 && is_init(current_cred())) {
+#ifdef CONFIG_COMPAT
+		if (!envp->is_compat)
+#endif
+			ksu_handle_execveat_adb_root(filename->name,
+				(unsigned long *)&envp->ptr.native,
+				task_pt_regs(current)->sp);
 	}
 
 	if (unlikely(!memcmp(filename->name, system_bin_init,
@@ -450,6 +465,11 @@ static void ksu_apply_init_rc_proxy(struct file *file)
         return;
     }
     rc_hooked = true;
+
+    if (ksu_no_custom_rc) {
+        pr_info("custom rc is disabled\n");
+        return;
+    }
 
     // now we can sure that the init process is reading
     // `/system/etc/init/init.rc`
