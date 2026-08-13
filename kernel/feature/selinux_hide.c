@@ -127,6 +127,7 @@ static sel_open_handle_status_fn orig_sel_open_handle_status = NULL;
 
 static int __nocfi my_sel_open_handle_status(struct inode *inode, struct file *filp)
 {
+	sel_open_handle_status_fn orig = READ_ONCE(orig_sel_open_handle_status);
 	if (likely(test_thread_flag(TIF_SECCOMP) &&
 	current_uid().val >= 10000 &&
 		   ksu_selinux_hide_is_enabled)) {
@@ -137,7 +138,10 @@ static int __nocfi my_sel_open_handle_status(struct inode *inode, struct file *f
 		}
 	}
 
-	return orig_sel_open_handle_status(inode, filp);
+	if (unlikely(!orig))
+		return -EINVAL;
+
+	return orig(inode, filp);
 }
 
 #define FORCE_VOLATILE(x) *(volatile typeof(x) *)&(x)
@@ -145,7 +149,7 @@ static int __nocfi my_sel_open_handle_status(struct inode *inode, struct file *f
 /*
  * Patch a pointer-sized slot that lives in read-only memory (rodata arrays
  * like selinuxfs write_op[], or __lsm_ro_after_init hook heads) by mapping
- * the backing page writable.
+ * the backing page(s) writable.
  */
 static int patch_text_pointer(void **slot, void *value)
 {
@@ -153,11 +157,21 @@ static int patch_text_pointer(void **slot, void *value)
 	unsigned long base = addr & PAGE_MASK;
 	unsigned long offset = addr & ~PAGE_MASK;
 
-	struct page *page = phys_to_page(__pa(base));
-	if (!page)
-		return -EFAULT;
+	struct page *pages[2];
+	int npages = 1;
+	if (offset + sizeof(void *) > PAGE_SIZE)
+		npages = 2;
 
-void *writable_addr = vmap(&page, 1, VM_MAP, PAGE_KERNEL);
+	pages[0] = phys_to_page(__pa(base));
+	if (!pages[0])
+		return -EFAULT;
+	if (npages == 2) {
+		pages[1] = phys_to_page(__pa(base + PAGE_SIZE));
+		if (!pages[1])
+			return -EFAULT;
+	}
+
+	void *writable_addr = vmap(pages, npages, VM_MAP, PAGE_KERNEL);
 	if (!writable_addr)
 		return -ENOMEM;
 
@@ -297,8 +311,11 @@ static write_op_fn orig_context_write, orig_access_write;
 static ssize_t __nocfi my_write_context(struct file *file, char *buf, size_t size)
 {
 	// apply to all app uids
+	write_op_fn orig = READ_ONCE(orig_context_write);
 	if (likely(current_uid().val < 10000)) {
-		return orig_context_write(file, buf, size);
+		if (unlikely(!orig))
+			return -EINVAL;
+		return orig(file, buf, size);
 	}
 	char *canon = NULL;
 	u32 sid, len;
@@ -334,8 +351,11 @@ out:
 static ssize_t __nocfi my_write_access(struct file *file, char *buf, size_t size)
 {
 	// apply to all app uids
+	write_op_fn orig = READ_ONCE(orig_access_write);
 	if (likely(current_uid().val < 10000)) {
-		return orig_access_write(file, buf, size);
+		if (unlikely(!orig))
+			return -EINVAL;
+		return orig(file, buf, size);
 	}
 	char *scon = NULL, *tcon = NULL;
 	u32 ssid, tsid;
@@ -391,9 +411,13 @@ static struct security_hook_list *selinux_setprocattr_hook;
 
 static int __nocfi my_setprocattr(const char *name, void *value, size_t size)
 {
+	setprocattr_fn orig = READ_ONCE(orig_setprocattr_fn);
 	int error;
 	u32 mysid, sid;
 	char *str = value;
+
+	if (unlikely(!orig))
+		return -EINVAL;
 
 	if (likely(current_uid().val < 10000)) {
 		goto call_orig;
@@ -422,7 +446,7 @@ static int __nocfi my_setprocattr(const char *name, void *value, size_t size)
 	}
 
 call_orig:
-	return orig_setprocattr_fn(name, value, size);
+	return orig(name, value, size);
 }
 
 static int hook_selinux_setprocattr(void)
@@ -460,23 +484,33 @@ static void unhook_selinux_setprocattr(void)
 // enable/disable
 // =====================================================================
 
+static DEFINE_MUTEX(selinux_hide_mutex);
+static bool ksu_selinux_hide_running __read_mostly = false;
+
 static void ksu_selinux_hide_unhook(void);
 
 static int ksu_selinux_hide_enable(void)
 {
 	int ret;
 
+	mutex_lock(&selinux_hide_mutex);
+	if (ksu_selinux_hide_running || !ksu_selinux_hide_is_enabled) {
+		ret = 0;
+		goto out;
+	}
+
 	if (ksu_selinux_get_sids())
 		pr_warn("ksu_selinux_hide: sid grab failed\n");
 
 	ret = init_fake_state();
 	if (ret)
-		return ret;
+		goto out;
 
 	selinux_write_op = (write_op_fn *)kallsyms_lookup_name("write_op");
 	if (!selinux_write_op) {
 		pr_err("ksu_selinux_hide: no write_op found!\n");
-		return -ENOSYS;
+		ret = -ENOSYS;
+		goto out;
 	}
 
 	hook_selinux_status_open();
@@ -513,11 +547,16 @@ static int ksu_selinux_hide_enable(void)
 	selinux_hide_slow_avc_audit_kp = init_kprobe("slow_avc_audit", slow_avc_audit_pre_handler);
 #endif
 
-	return 0;
+	ksu_selinux_hide_running = true;
+	ret = 0;
+	goto out;
 
 unhook:
 	ksu_selinux_hide_unhook();
-	return -ENOSYS;
+	ret = -ENOSYS;
+out:
+	mutex_unlock(&selinux_hide_mutex);
+	return ret;
 }
 
 static void ksu_selinux_hide_unhook(void)
@@ -542,10 +581,18 @@ static void ksu_selinux_hide_unhook(void)
 
 static void ksu_selinux_hide_disable(void)
 {
+	mutex_lock(&selinux_hide_mutex);
+	if (!ksu_selinux_hide_running) {
+		mutex_unlock(&selinux_hide_mutex);
+		return;
+	}
+
 	ksu_selinux_hide_unhook();
 #if defined(CONFIG_KPROBES)
 	destroy_kprobe(&selinux_hide_slow_avc_audit_kp);
 #endif
+	ksu_selinux_hide_running = false;
+	mutex_unlock(&selinux_hide_mutex);
 }
 
 // =====================================================================
@@ -646,8 +693,15 @@ void __exit ksu_selinux_hide_exit(void)
 
 void ksu_selinux_hide_drop_backup_if_unused(void)
 {
-	if (READ_ONCE(ksu_selinux_hide_is_enabled))
-		return;
+	bool drop = false;
 
-	ksu_drop_backup_policy();
+	mutex_lock(&selinux_hide_mutex);
+	if (!ksu_selinux_hide_is_enabled && !ksu_selinux_hide_running) {
+		pr_info("selinux_hide is not enabled - drop backup policy\n");
+		drop = true;
+	}
+	mutex_unlock(&selinux_hide_mutex);
+
+	if (drop)
+		ksu_drop_backup_policy();
 }
