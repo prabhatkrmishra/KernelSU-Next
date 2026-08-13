@@ -175,7 +175,11 @@ static long ksu_handle_execve_sucompat_common(const char __user **filename_user,
 
 	ret = strncpy_from_user_nofault(path, fn, sizeof(path));
 	if (ret < 0 && preempt_count()) {
-		preempt_enable_no_resched_notrace();
+		/*
+		 * preempt_enable_no_resched_notrace is #undef'd for modules,
+		 * use the always-available preempt_enable_notrace instead.
+		 */
+		preempt_enable_notrace();
 		ret = strncpy_from_user(path, fn, sizeof(path));
 		preempt_disable_notrace();
 	}
