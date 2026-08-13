@@ -559,7 +559,14 @@ void ksu_load_allow_list()
 	pr_info("allowlist version: %d\n", version);
 
 
-	static const size_t kAppProfileSizePreV4 = 776;
+	/*
+	 * v2/v3 allowlist records predate the root_profile.flags field that
+	 * v4 appended, so derive the old record size from the current layout
+	 * instead of hardcoding an arch-dependent byte count.
+	 */
+	static const size_t kAppProfileSizePreV4 =
+		sizeof(struct app_profile) -
+		sizeof(((struct root_profile *)0)->flags);
 	app_profile_size = version < KSU_APP_PROFILE_VER ? kAppProfileSizePreV4 : sizeof(struct app_profile);
 
 	while (true) {
