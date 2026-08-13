@@ -375,8 +375,6 @@ static int sepol_expected_argc(u32 cmd)
         return 5;
     case KSU_SEPOLICY_CMD_TYPE_CHANGE:
         return 4;
-    case KSU_SEPOLICY_CMD_GENFSCON:
-        return 3;
     default:
         return -EINVAL;
     }
@@ -529,26 +527,6 @@ static int apply_one_sepolicy_cmd(struct policydb *db,
             pr_err("sepol: unknown subcmd: %d\n", header->subcmd);
         }
         return success ? 0 : -EINVAL;
-
-    case KSU_SEPOLICY_CMD_GENFSCON:
-        ret = sepol_require_not_all(args[0], "name");
-        if (ret < 0) {
-            return ret;
-        }
-        ret = sepol_require_not_all(args[1], "path");
-        if (ret < 0) {
-            return ret;
-        }
-        ret = sepol_require_not_all(args[2], "context");
-        if (ret < 0) {
-            return ret;
-        }
-
-        if (!ksu_genfscon(db, args[0], args[1], args[2])) {
-            pr_err("sepol: %d failed.\n", header->cmd);
-            return -EINVAL;
-        }
-        return 0;
 
     default:
         pr_err("sepol: unknown cmd: %d\n", header->cmd);
