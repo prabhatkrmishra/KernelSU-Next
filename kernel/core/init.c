@@ -20,7 +20,6 @@
 #include "feature/sulog.h"
 #include "infra/file_wrapper.h"
 #include "selinux/selinux.h"
-#include "feature/selinux_hide.h"
 #include "feature/adb_root.h"
 
 #ifdef CONFIG_KSU_SUSFS
@@ -120,7 +119,6 @@ int __init kernelsu_init(void)
 
 		apply_kernelsu_rules();
 		cache_sid();
-		ksu_selinux_hide_init();
 		setup_ksu_cred();
 
 		// Grant current process (ksud late-load) root
@@ -151,8 +149,6 @@ int __init kernelsu_init(void)
 		ksu_lsm_hook_init();
 
 		ksu_adb_root_init();
-
-		ksu_selinux_hide_init();
 
 		ksu_allowlist_init();
 

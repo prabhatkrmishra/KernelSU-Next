@@ -22,7 +22,7 @@
 extern struct kprobe *init_kprobe(const char *name, int (*pre_handler)(struct kprobe *, struct pt_regs *));
 extern void destroy_kprobe(struct kprobe **kp_ptr);
 extern int slow_avc_audit_pre_handler(struct kprobe *p, struct pt_regs *regs);
-extern struct kprobe *slow_avc_audit_kp;
+static struct kprobe *selinux_hide_slow_avc_audit_kp;
 #endif
 
 static struct page *fake_status = NULL;
@@ -62,14 +62,14 @@ static void ksu_selinux_hide_enable(void)
 	if (ksu_selinux_get_sids())
 		pr_warn("ksu_selinux_hide: sid grab failed\n");
 #if defined(CONFIG_KPROBES)
-	slow_avc_audit_kp = init_kprobe("slow_avc_audit", slow_avc_audit_pre_handler);
+	selinux_hide_slow_avc_audit_kp = init_kprobe("slow_avc_audit", slow_avc_audit_pre_handler);
 #endif
 }
 
 static void ksu_selinux_hide_disable(void)
 {
 #if defined(CONFIG_KPROBES)
-	destroy_kprobe(&slow_avc_audit_kp);
+	destroy_kprobe(&selinux_hide_slow_avc_audit_kp);
 #endif
 }
 
