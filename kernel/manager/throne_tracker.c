@@ -349,7 +349,7 @@ static bool do_track_throne_core(bool prune_only)
 
 	// now update uid list
 	struct uid_data *np;
-	struct uid_data *n;
+	struct uid_data *tmp;
 
 	if (prune_only)
 		goto prune;
@@ -378,7 +378,7 @@ prune:
 	// then prune the allowlist
 	ksu_prune_allowlist(is_uid_exist, &uid_list);
 	// free uid_list
-	list_for_each_entry_safe (np, n, &uid_list, list) {
+	list_for_each_entry_safe (np, tmp, &uid_list, list) {
 		list_del(&np->list);
 		kfree(np);
 	}
