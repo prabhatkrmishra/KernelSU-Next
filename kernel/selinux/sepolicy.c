@@ -352,6 +352,13 @@ static void add_xperm_rule_raw(struct policydb *db, struct type_datum *src,
                 return;
             }
             memcpy(datum->u.xperms, &xperms, sizeof(xperms));
+        } else {
+            for (i = 0; i < ARRAY_SIZE(xperms.perms.p); i++) {
+                if (invert)
+                    datum->u.xperms->perms.p[i] &= ~xperms.perms.p[i];
+                else
+                    datum->u.xperms->perms.p[i] |= xperms.perms.p[i];
+            }
         }
     }
 }
