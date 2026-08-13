@@ -20,6 +20,7 @@
 #include "selinux.h"
 #include "sepolicy.h"
 #include "ss/services.h"
+#include "ss/sidtab.h"
 #include "linux/lsm_audit.h" // IWYU pragma: keep
 #include "xfrm.h"
 #include "compat/kernel_compat.h"
@@ -48,6 +49,87 @@ static struct policydb *get_policydb(void)
 #endif
     return db;
 }
+
+#ifndef SELINUX_POLICY_INSTEAD_SELINUX_SS
+#ifdef KSU_COMPAT_USE_SELINUX_STATE
+
+/*
+ * Pristine snapshot of the live policydb, taken before KSU mutates it in
+ * place.  Used by selinux hiding to answer app queries against the original
+ * rules.  The live policy is never destroyed while the backup may be used,
+ * so all non-copied fields of the backup share the live policy's storage.
+ */
+static struct policydb *backup_policydb;
+static struct sidtab *backup_sidtab;
+static DEFINE_MUTEX(ksu_backup_lock);
+
+int ksu_create_backup_policy_locked(void)
+{
+	struct policydb *db, *new_db;
+	struct sidtab *new_sidtab;
+
+	if (READ_ONCE(backup_policydb))
+		return 0;
+
+	db = get_policydb();
+	new_db = ksu_dup_policydb(db);
+	if (!new_db) {
+		pr_err("ksu: failed to backup policydb\n");
+		return -ENOMEM;
+	}
+
+	new_sidtab = kzalloc(sizeof(*new_sidtab), GFP_KERNEL);
+	if (!new_sidtab) {
+		ksu_destroy_policydb(new_db);
+		return -ENOMEM;
+	}
+
+	if (policydb_load_isids(new_db, new_sidtab)) {
+		pr_err("ksu: failed to load backup isids\n");
+		ksu_destroy_policydb(new_db);
+		kfree(new_sidtab);
+		return -EINVAL;
+	}
+
+	WRITE_ONCE(backup_policydb, new_db);
+	WRITE_ONCE(backup_sidtab, new_sidtab);
+	pr_info("ksu: backup policy created\n");
+	return 0;
+}
+
+struct policydb *ksu_get_backup_policydb(void)
+{
+	return READ_ONCE(backup_policydb);
+}
+
+struct sidtab *ksu_get_backup_sidtab(void)
+{
+	return READ_ONCE(backup_sidtab);
+}
+
+void ksu_drop_backup_policy(void)
+{
+	struct policydb *db;
+	struct sidtab *s;
+
+	mutex_lock(&ksu_backup_lock);
+	db = READ_ONCE(backup_policydb);
+	WRITE_ONCE(backup_policydb, NULL);
+	s = READ_ONCE(backup_sidtab);
+	WRITE_ONCE(backup_sidtab, NULL);
+	mutex_unlock(&ksu_backup_lock);
+
+	if (db)
+		ksu_destroy_policydb(db);
+	if (s) {
+		sidtab_destroy(s);
+		kfree(s);
+	}
+	pr_info("ksu: backup policy dropped\n");
+}
+
+#endif
+#endif
 
 #if ((!defined(KSU_COMPAT_USE_SELINUX_STATE)) || \
 	LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0))
@@ -239,6 +321,9 @@ out_unlock:
 
 	write_lock(lock);
 	preempt_enable();
+
+    // snapshot the pristine policy before we mutate it in place
+    ksu_create_backup_policy_locked();
 
     // we do this dance since both kernel and userspace can trigger this
 	if (likely(current && current->mm))

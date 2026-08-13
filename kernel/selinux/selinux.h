@@ -59,6 +59,12 @@ void apply_kernelsu_rules();
 
 int handle_sepolicy(void __user *user_data, u64 data_len);
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
+struct policydb *ksu_get_backup_policydb(void);
+struct sidtab *ksu_get_backup_sidtab(void);
+void ksu_drop_backup_policy(void);
+#endif
+
 void setup_ksu_cred();
 
 void escape_to_root_for_adb_root();
