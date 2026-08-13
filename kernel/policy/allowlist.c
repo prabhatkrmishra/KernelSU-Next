@@ -50,15 +50,16 @@ static int allow_list_pointer __read_mostly = 0;
 static void remove_uid_from_arr(uid_t uid)
 {
     int i;
-    for (i = 0; i < allow_list_pointer; i++) {
+    int count = allow_list_pointer;
+    for (i = 0; i < count; i++) {
         if (allow_list_arr[i] == uid) {
-            int remaining = allow_list_pointer - 1 - i;
+            int remaining = count - 1 - i;
             if (remaining > 0) {
                 memmove(&allow_list_arr[i], &allow_list_arr[i + 1],
                         remaining * sizeof(allow_list_arr[0]));
             }
-            allow_list_pointer--;
-            allow_list_arr[allow_list_pointer] = -1;
+            WRITE_ONCE(allow_list_arr[count - 1], -1);
+            smp_store_release(&allow_list_pointer, count - 1);
             return;
         }
     }
@@ -276,11 +277,13 @@ out:
 #endif
     } else if (profile->current_uid <= BITMAP_UID_MAX) {
         if (profile->allow_su)
-            allow_list_bitmap[profile->current_uid / BITS_PER_BYTE] |=
-                1 << (profile->current_uid % BITS_PER_BYTE);
+            WRITE_ONCE(allow_list_bitmap[profile->current_uid / BITS_PER_BYTE],
+                       allow_list_bitmap[profile->current_uid / BITS_PER_BYTE] |
+                           (1 << (profile->current_uid % BITS_PER_BYTE)));
         else
-            allow_list_bitmap[profile->current_uid / BITS_PER_BYTE] &=
-                ~(1 << (profile->current_uid % BITS_PER_BYTE));
+            WRITE_ONCE(allow_list_bitmap[profile->current_uid / BITS_PER_BYTE],
+                       allow_list_bitmap[profile->current_uid / BITS_PER_BYTE] &
+                           ~(1 << (profile->current_uid % BITS_PER_BYTE)));
     } else {
         if (profile->allow_su) {
             /*
@@ -291,7 +294,9 @@ out:
                 pr_err("too many apps registered\n");
                 WARN_ON(1);
             } else {
-                allow_list_arr[allow_list_pointer++] = profile->current_uid;
+                WRITE_ONCE(allow_list_arr[allow_list_pointer],
+                           profile->current_uid);
+                smp_store_release(&allow_list_pointer, allow_list_pointer + 1);
             }
         } else {
             remove_uid_from_arr(profile->current_uid);
@@ -347,11 +352,12 @@ bool __ksu_is_allow_uid(uid_t uid)
 	}
 
 	if (likely(uid <= BITMAP_UID_MAX)) {
-		return !!(allow_list_bitmap[uid / BITS_PER_BYTE] &
+		return !!(READ_ONCE(allow_list_bitmap[uid / BITS_PER_BYTE]) &
 				(1 << (uid % BITS_PER_BYTE)));
 	} else {
-		for (i = 0; i < allow_list_pointer; i++) {
-			if (allow_list_arr[i] == uid)
+		int count = smp_load_acquire(&allow_list_pointer);
+		for (i = 0; i < count; i++) {
+			if (READ_ONCE(allow_list_arr[i]) == uid)
 				return true;
 		}
 	}
@@ -622,8 +628,9 @@ void ksu_prune_allowlist(bool (*is_uid_valid)(uid_t, char *, void *),
             list_del_rcu(&np->list);
             kfree_rcu(np, rcu);
             if (likely(uid <= BITMAP_UID_MAX)) {
-                allow_list_bitmap[uid / BITS_PER_BYTE] &=
-                    ~(1 << (uid % BITS_PER_BYTE));
+                WRITE_ONCE(allow_list_bitmap[uid / BITS_PER_BYTE],
+                           allow_list_bitmap[uid / BITS_PER_BYTE] &
+                               ~(1 << (uid % BITS_PER_BYTE)));
             }
             remove_uid_from_arr(uid);
         }
