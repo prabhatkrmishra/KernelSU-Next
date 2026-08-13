@@ -2,8 +2,17 @@
 #define __KSU_H_SEPOLICY
 
 #include <linux/types.h>
+#include <linux/version.h>
 
 #include "ss/policydb.h"
+
+// Pre-5.10 kernels do not have the selinux_policy indirection, KSU mutates
+// selinux_state.ss->policydb in place.  selinux hiding needs a pristine
+// snapshot of that policydb plus a matching sidtab.
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
+struct policydb *ksu_dup_policydb(struct policydb *old_db);
+void ksu_destroy_policydb(struct policydb *db);
+#endif
 
 // Operation on types
 bool ksu_type(struct policydb *db, const char *name, const char *attr);
