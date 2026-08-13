@@ -16,6 +16,7 @@ bool ksu_boot_completed __read_mostly = false;
 extern void stop_input_hook();
 
 extern void ksu_avc_spoof_late_init();
+extern void ksu_selinux_hide_drop_backup_if_unused();
 
 void on_post_fs_data(void)
 {
@@ -69,4 +70,5 @@ void on_boot_completed(void)
     pr_info("on_boot_completed!\n");
     track_throne(true);
     ksu_avc_spoof_late_init();
+    ksu_selinux_hide_drop_backup_if_unused();
 }

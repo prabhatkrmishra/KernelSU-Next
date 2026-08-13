@@ -1,9 +1,14 @@
 #include <linux/fs.h>
 #include <linux/jump_label.h>
+#include <linux/list.h>
+#include <linux/lsm_hooks.h>
 #include <linux/mm.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/uaccess.h>
 #include <linux/version.h>
+#include <linux/vmalloc.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
 #include <asm/set_memory.h>
 #else
@@ -17,6 +22,12 @@
 #include  "uapi/feature.h"
 #include "selinux/selinux.h"
 #include "feature/selinux_hide.h"
+
+#include "ss/services.h"
+#include "ss/sidtab.h"
+#include "avc.h"
+#include "flask.h"
+#include "av_permissions.h"
 
 #if defined(CONFIG_KPROBES)
 extern struct kprobe *init_kprobe(const char *name, int (*pre_handler)(struct kprobe *, struct pt_regs *));
@@ -34,6 +45,8 @@ extern bool ksu_input_hook __read_mostly __attribute__((weak));
 extern bool ksu_input_hook __read_mostly;
 #endif
 extern struct selinux_state selinux_state;
+
+extern unsigned long kallsyms_lookup_name(const char *name);
 
 // enabled by default
 static bool ksu_selinux_hide_is_enabled __read_mostly = true;
@@ -55,22 +68,6 @@ static int ksu_selinux_get_sids(void)
 	if (!err1) pr_info("ksu_selinux_hide: ksu_sid=%u\n", ksu_sid);
 	if (!err2) pr_info("ksu_selinux_hide: priv_app_sid=%u\n", priv_app_sid);
 	return (!ksu_sid || !priv_app_sid) ? -1 : 0;
-}
-
-static void ksu_selinux_hide_enable(void)
-{
-	if (ksu_selinux_get_sids())
-		pr_warn("ksu_selinux_hide: sid grab failed\n");
-#if defined(CONFIG_KPROBES)
-	selinux_hide_slow_avc_audit_kp = init_kprobe("slow_avc_audit", slow_avc_audit_pre_handler);
-#endif
-}
-
-static void ksu_selinux_hide_disable(void)
-{
-#if defined(CONFIG_KPROBES)
-	destroy_kprobe(&selinux_hide_slow_avc_audit_kp);
-#endif
 }
 
 static void initialize_fake_status(void)
@@ -145,13 +142,17 @@ static int __nocfi my_sel_open_handle_status(struct inode *inode, struct file *f
 
 #define FORCE_VOLATILE(x) *(volatile typeof(x) *)&(x)
 
-static int patch_fops_open(struct file_operations *ops,
-			    sel_open_handle_status_fn new_open)
+/*
+ * Patch a pointer-sized slot that lives in read-only memory (rodata arrays
+ * like selinuxfs write_op[], or __lsm_ro_after_init hook heads) by mapping
+ * the backing page writable.
+ */
+static int patch_text_pointer(void **slot, void *value)
 {
-	unsigned long addr = (unsigned long)&ops->open;
+	unsigned long addr = (unsigned long)slot;
 	unsigned long base = addr & PAGE_MASK;
 	unsigned long offset = addr & ~PAGE_MASK;
-	
+
 	struct page *page = phys_to_page(__pa(base));
 	if (!page)
 		return -EFAULT;
@@ -164,13 +165,19 @@ void *writable_addr = vmap(&page, 1, VM_MAP, PAGE_KERNEL);
 
 	preempt_disable();
 	local_irq_disable();
-	FORCE_VOLATILE(*target_slot) = (void *)new_open;
+	FORCE_VOLATILE(*target_slot) = value;
 	local_irq_enable();
 	preempt_enable();
 
 	vunmap(writable_addr);
 	smp_mb();
 	return 0;
+}
+
+static int patch_fops_open(struct file_operations *ops,
+			    sel_open_handle_status_fn new_open)
+{
+	return patch_text_pointer((void **)&ops->open, (void *)new_open);
 }
 
 static int resolve_fops(const char *path_str, struct file_operations **out_fops)
@@ -233,6 +240,318 @@ static void unhook_selinux_status_open(void)
 	pr_info("ksu_selinux_hide: unhooked sel_handle_status_ops->open\n");
 }
 
+// =====================================================================
+// write_op[] (context/access) spoofing against a pristine policy backup
+// =====================================================================
+
+/*
+ * The live policy is mutated in place by KSU, so answering app queries
+ * against it would leak KSU rules.  answer them against a snapshot of the
+ * pristine policy instead.
+ */
+static struct selinux_state fake_state;
+static struct selinux_ss fake_ss;
+
+static int init_fake_state(void)
+{
+	struct selinux_state *real = &selinux_state;
+	struct policydb *backup_db;
+	struct sidtab *backup_sidtab;
+
+	if (!real->ss || !real->initialized)
+		return -EAGAIN;
+
+	backup_db = ksu_get_backup_policydb();
+	backup_sidtab = ksu_get_backup_sidtab();
+	if (!backup_db || !backup_sidtab) {
+		pr_warn("ksu_selinux_hide: no backup policy available yet\n");
+		return -EAGAIN;
+	}
+
+	memset(&fake_state, 0, sizeof(fake_state));
+	memset(&fake_ss, 0, sizeof(fake_ss));
+	fake_state.initialized = true;
+	fake_state.ss = &fake_ss;
+	fake_ss.policydb = *backup_db;
+	fake_ss.sidtab = backup_sidtab;
+	rwlock_init(&fake_ss.policy_rwlock);
+	fake_ss.latest_granting = real->ss->latest_granting;
+	fake_ss.map = real->ss->map;
+	return 0;
+}
+
+typedef ssize_t (*write_op_fn)(struct file *, char *, size_t);
+
+enum sel_inos {
+	SEL_ROOT_INO = 2,
+	SEL_LOAD, /* load policy */
+	SEL_ENFORCE, /* get or set enforcing status */
+	SEL_CONTEXT, /* validate context */
+	SEL_ACCESS, /* compute access decision */
+};
+
+static write_op_fn *selinux_write_op;
+static write_op_fn *context_write, *access_write;
+static write_op_fn orig_context_write, orig_access_write;
+
+static ssize_t __nocfi my_write_context(struct file *file, char *buf, size_t size)
+{
+	// apply to all app uids
+	if (likely(current_uid().val < 10000)) {
+		return orig_context_write(file, buf, size);
+	}
+	char *canon = NULL;
+	u32 sid, len;
+	ssize_t length;
+
+	length = avc_has_perm(&selinux_state, current_sid(), SECINITSID_SECURITY,
+			      SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
+	if (length)
+		goto out;
+
+	length = security_context_to_sid(&fake_state, buf, size, &sid, GFP_KERNEL);
+	if (length)
+		goto out;
+
+	length = security_sid_to_context(&fake_state, sid, &canon, &len);
+	if (length)
+		goto out;
+
+	length = -ERANGE;
+	if (len > SIMPLE_TRANSACTION_LIMIT) {
+		pr_err("SELinux: %s:  context size (%u) exceeds "
+		       "payload max\n", __func__, len);
+		goto out;
+	}
+
+	memcpy(buf, canon, len);
+	length = len;
+out:
+	kfree(canon);
+	return length;
+}
+
+static ssize_t __nocfi my_write_access(struct file *file, char *buf, size_t size)
+{
+	// apply to all app uids
+	if (likely(current_uid().val < 10000)) {
+		return orig_access_write(file, buf, size);
+	}
+	char *scon = NULL, *tcon = NULL;
+	u32 ssid, tsid;
+	u16 tclass;
+	struct av_decision avd;
+	ssize_t length;
+
+	length = avc_has_perm(&selinux_state, current_sid(), SECINITSID_SECURITY,
+			      SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
+	if (length)
+		goto out;
+
+	length = -ENOMEM;
+	scon = kzalloc(size + 1, GFP_KERNEL);
+	if (!scon)
+		goto out;
+
+	length = -ENOMEM;
+	tcon = kzalloc(size + 1, GFP_KERNEL);
+	if (!tcon)
+		goto out;
+
+	length = -EINVAL;
+	if (sscanf(buf, "%s %s %hu", scon, tcon, &tclass) != 3)
+		goto out;
+
+	length = security_context_str_to_sid(&fake_state, scon, &ssid, GFP_KERNEL);
+	if (length)
+		goto out;
+
+	length = security_context_str_to_sid(&fake_state, tcon, &tsid, GFP_KERNEL);
+	if (length)
+		goto out;
+
+	security_compute_av_user(&fake_state, ssid, tsid, tclass, &avd);
+
+	length = scnprintf(buf, SIMPLE_TRANSACTION_LIMIT, "%x %x %x %x %u %x",
+			   avd.allowed, 0xffffffff, avd.auditallow, avd.auditdeny,
+			   avd.seqno, avd.flags);
+out:
+	kfree(tcon);
+	kfree(scon);
+	return length;
+}
+
+// =====================================================================
+// setprocattr spoofing: swap selinux's own LSM hook slot
+// =====================================================================
+
+typedef int (*setprocattr_fn)(const char *name, void *value, size_t size);
+static setprocattr_fn orig_setprocattr_fn;
+static struct security_hook_list *selinux_setprocattr_hook;
+
+static int __nocfi my_setprocattr(const char *name, void *value, size_t size)
+{
+	int error;
+	u32 mysid, sid;
+	char *str = value;
+
+	if (likely(current_uid().val < 10000)) {
+		goto call_orig;
+	}
+
+	if (strcmp(name, "current")) {
+		goto call_orig;
+	}
+	mysid = current_sid();
+
+	error = avc_has_perm(&selinux_state, mysid, mysid, SECCLASS_PROCESS,
+			     PROCESS__SETCURRENT, NULL);
+	if (error) {
+		return error;
+	}
+
+	if (size && str[0] && str[0] != '\n') {
+		if (str[size - 1] == '\n') {
+			str[size - 1] = 0;
+			size--;
+		}
+		error = security_context_to_sid(&fake_state, str, size, &sid, GFP_KERNEL);
+		if (error) {
+			return error;
+		}
+	}
+
+call_orig:
+	return orig_setprocattr_fn(name, value, size);
+}
+
+static int hook_selinux_setprocattr(void)
+{
+	struct security_hook_list *hp;
+
+	if (orig_setprocattr_fn)
+		return 0;
+
+	hlist_for_each_entry(hp, &security_hook_heads.setprocattr, list) {
+		if (hp->lsm && strcmp(hp->lsm, "selinux") == 0) {
+			selinux_setprocattr_hook = hp;
+			orig_setprocattr_fn = hp->hook.setprocattr;
+			return patch_text_pointer(
+				(void **)&selinux_setprocattr_hook->hook.setprocattr,
+				(void *)my_setprocattr);
+		}
+	}
+
+	return -ENOENT;
+}
+
+static void unhook_selinux_setprocattr(void)
+{
+	if (!orig_setprocattr_fn)
+		return;
+
+	patch_text_pointer((void **)&selinux_setprocattr_hook->hook.setprocattr,
+			   (void *)orig_setprocattr_fn);
+	orig_setprocattr_fn = NULL;
+	selinux_setprocattr_hook = NULL;
+}
+
+// =====================================================================
+// enable/disable
+// =====================================================================
+
+static void ksu_selinux_hide_unhook(void);
+
+static int ksu_selinux_hide_enable(void)
+{
+	int ret;
+
+	if (ksu_selinux_get_sids())
+		pr_warn("ksu_selinux_hide: sid grab failed\n");
+
+	ret = init_fake_state();
+	if (ret)
+		return ret;
+
+	selinux_write_op = (write_op_fn *)kallsyms_lookup_name("write_op");
+	if (!selinux_write_op) {
+		pr_err("ksu_selinux_hide: no write_op found!\n");
+		return -ENOSYS;
+	}
+
+	hook_selinux_status_open();
+
+	context_write = &selinux_write_op[SEL_CONTEXT];
+	pr_info("ksu_selinux_hide: context_write: 0x%lx [%pSb]\n",
+		(unsigned long)*context_write, *context_write);
+	write_op_fn my = my_write_context;
+	orig_context_write = *context_write;
+	ret = patch_text_pointer((void **)context_write, (void *)my);
+	if (ret) {
+		pr_err("ksu_selinux_hide: patch_text context_write err: %d\n", ret);
+		goto unhook;
+	}
+
+	access_write = &selinux_write_op[SEL_ACCESS];
+	pr_info("ksu_selinux_hide: access_write: 0x%lx [%pSb]\n",
+		(unsigned long)*access_write, *access_write);
+	my = my_write_access;
+	orig_access_write = *access_write;
+	ret = patch_text_pointer((void **)access_write, (void *)my);
+	if (ret) {
+		pr_err("ksu_selinux_hide: patch_text access_write err: %d\n", ret);
+		goto unhook;
+	}
+
+	ret = hook_selinux_setprocattr();
+	if (ret) {
+		pr_err("ksu_selinux_hide: hook setprocattr err: %d\n", ret);
+		goto unhook;
+	}
+
+#if defined(CONFIG_KPROBES)
+	selinux_hide_slow_avc_audit_kp = init_kprobe("slow_avc_audit", slow_avc_audit_pre_handler);
+#endif
+
+	return 0;
+
+unhook:
+	ksu_selinux_hide_unhook();
+	return -ENOSYS;
+}
+
+static void ksu_selinux_hide_unhook(void)
+{
+	int ret;
+
+	if (orig_context_write) {
+		ret = patch_text_pointer((void **)context_write, (void *)orig_context_write);
+		orig_context_write = NULL;
+		if (ret)
+			pr_err("ksu_selinux_hide: exit: patch_text context_write err: %d\n", ret);
+	}
+	if (orig_access_write) {
+		ret = patch_text_pointer((void **)access_write, (void *)orig_access_write);
+		orig_access_write = NULL;
+		if (ret)
+			pr_err("ksu_selinux_hide: exit: patch_text access_write err: %d\n", ret);
+	}
+	unhook_selinux_status_open();
+	unhook_selinux_setprocattr();
+}
+
+static void ksu_selinux_hide_disable(void)
+{
+	ksu_selinux_hide_unhook();
+#if defined(CONFIG_KPROBES)
+	destroy_kprobe(&selinux_hide_slow_avc_audit_kp);
+#endif
+}
+
+// =====================================================================
+// feature handler
+// =====================================================================
+
 static int selinux_hide_status_feature_get(u64 *value)
 {
 	*value = ksu_selinux_hide_is_enabled ? 1 : 0;
@@ -242,19 +561,24 @@ static int selinux_hide_status_feature_get(u64 *value)
 static int selinux_hide_status_feature_set(u64 value)
 {
 	bool enable = !!value;
+	int ret = 0;
+
 	if (enable == ksu_selinux_hide_is_enabled) {
 		pr_info("ksu_selinux_hide: no need to change\n");
 		return 0;
 	}
 	ksu_selinux_hide_is_enabled = enable;
 
-	if (!ksu_selinux_hide_is_enabled)
+	if (!enable)
 		ksu_selinux_hide_disable();
 	else
-		ksu_selinux_hide_enable();
+		ret = ksu_selinux_hide_enable();
 
-	pr_info("ksu_selinux_hide: set to %d\n", enable);
-	return 0;
+	if (ret)
+		pr_warn("ksu_selinux_hide: set to %d failed: %d\n", enable, ret);
+	else
+		pr_info("ksu_selinux_hide: set to %d\n", enable);
+	return ret;
 }
 
 static const struct ksu_feature_handler selinux_hide_status_handler = {
@@ -271,8 +595,16 @@ static int ksu_hide_init_thread(void *data)
 	while (READ_ONCE(ksu_input_hook))
 		msleep(5000);
 
-	if (ksu_selinux_hide_is_enabled)
-		ksu_selinux_hide_enable();
+	if (ksu_selinux_hide_is_enabled) {
+		int tries = 0;
+		while (ksu_selinux_hide_enable()) {
+			if (++tries > 10) {
+				pr_warn("ksu_selinux_hide: giving up on enable after %d tries\n", tries);
+				break;
+			}
+			msleep(1000);
+		}
+	}
 
 	int tries = 0;
 try_again:
@@ -303,7 +635,6 @@ void __init ksu_selinux_hide_init(void)
 void __exit ksu_selinux_hide_exit(void)
 {
 	ksu_unregister_feature_handler(KSU_FEATURE_SELINUX_HIDE_STATUS);
-	unhook_selinux_status_open();
 	ksu_selinux_hide_disable();
 	mutex_lock(&fake_status_init_mutex);
 	if (fake_status) {
@@ -311,4 +642,12 @@ void __exit ksu_selinux_hide_exit(void)
 		fake_status = NULL;
 	}
 	mutex_unlock(&fake_status_init_mutex);
+}
+
+void ksu_selinux_hide_drop_backup_if_unused(void)
+{
+	if (READ_ONCE(ksu_selinux_hide_is_enabled))
+		return;
+
+	ksu_drop_backup_policy();
 }
