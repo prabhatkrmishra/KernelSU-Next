@@ -1542,27 +1542,33 @@ static struct hashtab *ksu_dup_hashtab_shallow(struct hashtab *old_tab)
 
 // ======== class_datum ========
 
+static void free_class_constraints_5_4(struct class_datum *cls)
+{
+    struct constraint_node *n, *nprev;
+    struct constraint_expr *e, *eprev;
+    for (n = cls->constraints; n;) {
+        for (e = n->expr; e;) {
+            if (e->expr_type == CEXPR_NAMES) {
+                ebitmap_destroy(&e->names);
+            }
+            eprev = e;
+            e = e->next;
+            kfree(eprev);
+        }
+        nprev = n;
+        n = n->next;
+        kfree(nprev);
+    }
+    cls->constraints = NULL;
+}
+
 static int destroy_class_datum_partially_5_4(void *key, void *datum, void *data)
 {
     struct class_datum *cls = datum;
-    struct constraint_node *n, *nprev;
-    struct constraint_expr *e, *eprev;
     if (cls) {
-        for (n = cls->constraints; n;) {
-            for (e = n->expr; e;) {
-                if (e->expr_type == CEXPR_NAMES) {
-                    ebitmap_destroy(&e->names);
-                }
-                eprev = e;
-                e = e->next;
-                kfree(eprev);
-            }
-            nprev = n;
-            n = n->next;
-            kfree(nprev);
-        }
+        free_class_constraints_5_4(cls);
+        kfree(cls);
     }
-    kfree(cls);
     return 0;
 }
 
@@ -1612,8 +1618,21 @@ static int copy_class_datum_partially_5_4_callback(void *key, void *datum,
     }
     db->class_val_to_struct[new_cls->value - 1] = new_cls;
 
-    return hashtab_insert(db->p_classes.table, key, new_cls);
+    ret = hashtab_insert(db->p_classes.table, key, new_cls);
+    if (ret) {
+        /* not linked into the table: undo the val_to_struct slot and
+         * free everything we built for this class */
+        db->class_val_to_struct[new_cls->value - 1] = NULL;
+        free_class_constraints_5_4(new_cls);
+        kfree(new_cls);
+    }
+    return ret;
 out_nomem:
+    /* every node allocated so far is already linked into
+     * new_cls->constraints, so one walk frees the whole chain */
+    db->class_val_to_struct[new_cls->value - 1] = NULL;
+    free_class_constraints_5_4(new_cls);
+    kfree(new_cls);
     return -ENOMEM;
 }
 
@@ -1737,6 +1756,12 @@ static int copy_role_datum_partially_5_4_callback(void *key, void *datum,
     db->role_val_to_struct[role->value - 1] = new_role;
 
     ret = hashtab_insert(db->p_roles.table, key, new_role);
+    if (ret) {
+        /* not linked into the table: undo the val_to_struct slot and
+         * free the copy we built */
+        db->role_val_to_struct[role->value - 1] = NULL;
+        goto out_free;
+    }
 out:
     return ret;
 out_free:

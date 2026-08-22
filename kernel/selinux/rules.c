@@ -67,34 +67,48 @@ int ksu_create_backup_policy_locked(void)
 {
 	struct policydb *db, *new_db;
 	struct sidtab *new_sidtab;
+	int ret = 0;
 
+	/*
+	 * Serialize against ksu_drop_backup_policy(): the caller holds
+	 * the policy write lock, but drop does not, so the backup lock
+	 * is what keeps a concurrent drop from destroying the tables we
+	 * are about to publish (or vice versa).
+	 */
+	mutex_lock(&ksu_backup_lock);
 	if (READ_ONCE(backup_policydb))
-		return 0;
+		goto out_unlock;
 
 	db = get_policydb();
 	new_db = ksu_dup_policydb(db);
 	if (!new_db) {
 		pr_err("ksu: failed to backup policydb\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out_unlock;
 	}
 
 	new_sidtab = kzalloc(sizeof(*new_sidtab), GFP_KERNEL);
 	if (!new_sidtab) {
 		ksu_destroy_policydb(new_db);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out_unlock;
 	}
 
 	if (policydb_load_isids(new_db, new_sidtab)) {
 		pr_err("ksu: failed to load backup isids\n");
 		ksu_destroy_policydb(new_db);
 		kfree(new_sidtab);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_unlock;
 	}
 
 	WRITE_ONCE(backup_policydb, new_db);
 	WRITE_ONCE(backup_sidtab, new_sidtab);
 	pr_info("ksu: backup policy created\n");
-	return 0;
+
+out_unlock:
+	mutex_unlock(&ksu_backup_lock);
+	return ret;
 }
 
 struct policydb *ksu_get_backup_policydb(void)
@@ -117,14 +131,19 @@ void ksu_drop_backup_policy(void)
 	WRITE_ONCE(backup_policydb, NULL);
 	s = READ_ONCE(backup_sidtab);
 	WRITE_ONCE(backup_sidtab, NULL);
-	mutex_unlock(&ksu_backup_lock);
 
+	/*
+	 * Destroy under the lock so a concurrent create (which holds
+	 * this lock while building and publishing) can never observe a
+	 * half-torn-down backup.
+	 */
 	if (db)
 		ksu_destroy_policydb(db);
 	if (s) {
 		sidtab_destroy(s);
 		kfree(s);
 	}
+	mutex_unlock(&ksu_backup_lock);
 	pr_info("ksu: backup policy dropped\n");
 }
 

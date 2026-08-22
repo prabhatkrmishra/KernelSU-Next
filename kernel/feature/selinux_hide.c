@@ -1,4 +1,5 @@
 #include <linux/fs.h>
+#include <linux/atomic.h>
 #include <linux/jump_label.h>
 #include <linux/list.h>
 #include <linux/lsm_hooks.h>
@@ -266,6 +267,13 @@ static void unhook_selinux_status_open(void)
 static struct selinux_state fake_state;
 static struct selinux_ss fake_ss;
 
+/*
+ * Spoof query handlers read fake_state, which aliases the backup
+ * policy's storage; disable() drains this counter after unhooking so
+ * the backup can never be freed under an in-flight query.
+ */
+static atomic_t hide_query_inflight = ATOMIC_INIT(0);
+
 static int init_fake_state(void)
 {
 	struct selinux_state *real = &selinux_state;
@@ -321,6 +329,7 @@ static ssize_t __nocfi my_write_context(struct file *file, char *buf, size_t siz
 	u32 sid, len;
 	ssize_t length;
 
+	atomic_inc(&hide_query_inflight);
 	length = avc_has_perm(&selinux_state, current_sid(), SECINITSID_SECURITY,
 			      SECCLASS_SECURITY, SECURITY__CHECK_CONTEXT, NULL);
 	if (length)
@@ -344,6 +353,7 @@ static ssize_t __nocfi my_write_context(struct file *file, char *buf, size_t siz
 	memcpy(buf, canon, len);
 	length = len;
 out:
+	atomic_dec(&hide_query_inflight);
 	kfree(canon);
 	return length;
 }
@@ -363,6 +373,7 @@ static ssize_t __nocfi my_write_access(struct file *file, char *buf, size_t size
 	struct av_decision avd;
 	ssize_t length;
 
+	atomic_inc(&hide_query_inflight);
 	length = avc_has_perm(&selinux_state, current_sid(), SECINITSID_SECURITY,
 			      SECCLASS_SECURITY, SECURITY__COMPUTE_AV, NULL);
 	if (length)
@@ -396,6 +407,7 @@ static ssize_t __nocfi my_write_access(struct file *file, char *buf, size_t size
 			   avd.allowed, 0xffffffff, avd.auditallow, avd.auditdeny,
 			   avd.seqno, avd.flags);
 out:
+	atomic_dec(&hide_query_inflight);
 	kfree(tcon);
 	kfree(scon);
 	return length;
@@ -439,7 +451,10 @@ static int __nocfi my_setprocattr(const char *name, void *value, size_t size)
 			str[size - 1] = 0;
 			size--;
 		}
-		error = security_context_to_sid(&fake_state, str, size, &sid, GFP_KERNEL);
+		atomic_inc(&hide_query_inflight);
+		error = security_context_to_sid(&fake_state, str, size, &sid,
+						GFP_KERNEL);
+		atomic_dec(&hide_query_inflight);
 		if (error) {
 			return error;
 		}
@@ -592,6 +607,16 @@ static void ksu_selinux_hide_disable(void)
 	destroy_kprobe(&selinux_hide_slow_avc_audit_kp);
 #endif
 	ksu_selinux_hide_running = false;
+
+	/*
+	 * Let in-flight spoof queries finish before returning: once we
+	 * drop the mutex, the pristine backup may be freed (see
+	 * ksu_selinux_hide_drop_backup_if_unused()), and those queries
+	 * read fake_state which aliases it.
+	 */
+	while (atomic_read(&hide_query_inflight))
+		usleep_range(50, 100);
+
 	mutex_unlock(&selinux_hide_mutex);
 }
 
@@ -695,13 +720,16 @@ void ksu_selinux_hide_drop_backup_if_unused(void)
 {
 	bool drop = false;
 
+	/*
+	 * Hold the hide mutex across both the check and the drop: it
+	 * excludes ksu_selinux_hide_enable(), whose fake_state aliases
+	 * the backup storage, and disable() has already drained any
+	 * in-flight spoof queries by the time running goes false.
+	 */
 	mutex_lock(&selinux_hide_mutex);
-	if (!ksu_selinux_hide_is_enabled && !ksu_selinux_hide_running) {
-		pr_info("selinux_hide is not enabled - drop backup policy\n");
+	if (!ksu_selinux_hide_is_enabled && !ksu_selinux_hide_running)
 		drop = true;
-	}
-	mutex_unlock(&selinux_hide_mutex);
-
 	if (drop)
 		ksu_drop_backup_policy();
+	mutex_unlock(&selinux_hide_mutex);
 }
