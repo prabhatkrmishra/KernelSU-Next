@@ -187,6 +187,12 @@ int ksu_handle_umount(uid_t old_uid, uid_t new_uid)
 	// umount the target mnt
 	pr_info("handle umount for uid: %d, pid: %d\n", new_uid, current->pid);
 
+#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
+	/* susfs umounts come first; the legacy KSU umounts below run later
+	 * via task_work, preserving the upstream reversed-order requirement */
+	susfs_try_umount_all(new_uid);
+#endif
+
 	tw = kzalloc(sizeof(*tw), GFP_ATOMIC);
 	if (!tw)
 		return 0;
