@@ -24,6 +24,10 @@
 
 static bool ksu_kernel_umount_enabled = true;
 
+#ifdef CONFIG_KSU_SUSFS
+extern bool susfs_is_mnt_devname_ksu(struct path *path);
+#endif
+
 static int kernel_umount_feature_get(u64 *value)
 {
 	*value = ksu_kernel_umount_enabled ? 1 : 0;
@@ -79,7 +83,33 @@ static void ksu_sys_umount(const char *mnt, int flags)
 
 #endif
 
-static void try_umount(const char *mnt, int flags)
+static bool should_umount(struct path *path)
+{
+	if (!path) {
+		return false;
+	}
+
+	// never umount anything in the global (init) mount namespace
+	if (current->nsproxy->mnt_ns == init_nsproxy.mnt_ns) {
+		return false;
+	}
+
+#ifdef CONFIG_KSU_SUSFS
+	// only mounts created by KSU (source/devname "KSU") - this is what
+	// keeps the hardcoded partition paths below from detaching the REAL
+	// /system, /system_ext, ... in app namespaces when no module overlay
+	// covers them.
+	return susfs_is_mnt_devname_ksu(path);
+#else
+	if (path->mnt && path->mnt->mnt_sb && path->mnt->mnt_sb->s_type) {
+		const char *fstype = path->mnt->mnt_sb->s_type->name;
+		return strcmp(fstype, "overlay") == 0;
+	}
+	return false;
+#endif
+}
+
+static void try_umount(const char *mnt, bool check_mnt, int flags)
 {
 	struct path path;
 	int err = kern_path(mnt, 0, &path);
@@ -92,7 +122,14 @@ static void try_umount(const char *mnt, int flags)
 		path_put(&path);
 		return;
 	}
-    ksu_umount_mnt(mnt, &path, flags);
+
+	// we are only interested in some specific mounts
+	if (check_mnt && !should_umount(&path)) {
+		path_put(&path);
+		return;
+	}
+
+	ksu_umount_mnt(mnt, &path, flags);
 }
 
 void ksu_try_umount(const char *mnt, bool check_mnt, int flags, uid_t uid)
@@ -103,7 +140,7 @@ void ksu_try_umount(const char *mnt, bool check_mnt, int flags, uid_t uid)
 		pr_info("susfs: umounting '%s' for uid: %d\n", mnt, uid);
 	}
 #endif
-	try_umount(mnt, flags);
+	try_umount(mnt, check_mnt, flags);
 }
 
 #ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
@@ -134,7 +171,7 @@ static void umount_tw_func(struct callback_head *cb)
     down_read(&mount_list_lock);
     list_for_each_entry(entry, &mount_list, list) {
         pr_info("%s: unmounting: %s flags: 0x%x\n", __func__, entry->umountable, entry->flags);
-        try_umount(entry->umountable, entry->flags);
+        try_umount(entry->umountable, false, entry->flags);
     }
     up_read(&mount_list_lock);
 
