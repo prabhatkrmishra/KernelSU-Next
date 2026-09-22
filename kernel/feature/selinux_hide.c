@@ -35,8 +35,8 @@ extern void ksu_wait_stop_input_hook(void);
 #endif
 extern struct selinux_state selinux_state;
 
-// enabled by default
-static bool ksu_selinux_hide_is_enabled __read_mostly = true;
+// disabled by default
+static bool ksu_selinux_hide_is_enabled __read_mostly = false; // stub gate broke security_check_context for all apps
 
 static u32 ksu_sid __read_mostly = 0;
 static u32 priv_app_sid __read_mostly = 0;
