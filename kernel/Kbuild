@@ -148,7 +148,13 @@ endif
 endif
 
 ifneq ($(HAVE_KSU_HOOK),0)
+ifeq ($(wildcard .config),)
+# clean/mrproper descend into every obj directory with no config parsed; the
+# hook mode is only knowable during a real build.
+$(info -- KernelSU-Next: configless phase, deferring hook check to build time)
+else
 $(error -- KernelSU-Next: No hooks were defined, please integrate manual hooks in your kernel!)
+endif
 endif
 
 # some backports
