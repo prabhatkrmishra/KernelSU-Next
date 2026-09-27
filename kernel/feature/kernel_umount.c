@@ -27,6 +27,9 @@ static bool ksu_kernel_umount_enabled = true;
 #ifdef CONFIG_KSU_SUSFS
 extern bool susfs_is_mnt_devname_ksu(struct path *path);
 #endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+extern void susfs_detach_sus_mounts_current_ns(void);
+#endif
 
 static int kernel_umount_feature_get(u64 *value)
 {
@@ -228,6 +231,11 @@ int ksu_handle_umount(uid_t old_uid, uid_t new_uid)
 	/* susfs umounts come first; the legacy KSU umounts below run later
 	 * via task_work, preserving the upstream reversed-order requirement */
 	susfs_try_umount_all(new_uid);
+#endif
+#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+	/* catch-all: detach every remaining sus mount in this namespace,
+	 * including anything that never made it into the try-umount list */
+	susfs_detach_sus_mounts_current_ns();
 #endif
 
 	tw = kzalloc(sizeof(*tw), GFP_ATOMIC);
