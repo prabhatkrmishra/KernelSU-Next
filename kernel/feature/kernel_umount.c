@@ -25,7 +25,7 @@
 static bool ksu_kernel_umount_enabled = true;
 
 #ifdef CONFIG_KSU_SUSFS
-extern bool susfs_is_mnt_devname_ksu(struct path *path);
+extern bool susfs_is_mnt_sus(struct path *path);
 #endif
 #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
 extern void susfs_detach_sus_mounts_current_ns(void);
@@ -98,11 +98,13 @@ static bool should_umount(struct path *path)
 	}
 
 #ifdef CONFIG_KSU_SUSFS
-	// only mounts created by KSU (source/devname "KSU") - this is what
-	// keeps the hardcoded partition paths below from detaching the REAL
-	// /system, /system_ext, ... in app namespaces when no module overlay
-	// covers them.
-	return susfs_is_mnt_devname_ksu(path);
+	// only mounts susfs allocated an id for, i.e. mounts KSU created.
+	// This is what keeps the hardcoded partition paths below from
+	// detaching the REAL /system, /system_ext, ... in app namespaces
+	// when no module overlay covers them. Do not use the devname check
+	// here: nothing in the kernel tree ever assigns mnt_devname "KSU",
+	// so it rejected every mount.
+	return susfs_is_mnt_sus(path);
 #else
 	if (path->mnt && path->mnt->mnt_sb && path->mnt->mnt_sb->s_type) {
 		const char *fstype = path->mnt->mnt_sb->s_type->name;
