@@ -42,6 +42,7 @@
 #include "ksud.h"
 #include "ksud_boot.h"
 #include "feature/selinux_hide.h"
+#include "feature/adb_root.h"
 #include "selinux/selinux.h"
 #include "compat/kernel_compat.h"
 
@@ -306,6 +307,22 @@ int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
 	filename = *filename_ptr;
 	if (IS_ERR(filename)) {
 		return 0;
+	}
+
+	/*
+	 * adb root: rewrite envp to preload libadbroot.so when adbd is
+	 * exec'd. Only init-spawned processes (which fork adbd) may reach
+	 * this, otherwise any app could exec a file named "adbd" and get
+	 * escalated to the ksu domain. Under MANUAL_HOOK there is no
+	 * sys_enter tracepoint to hang this off, so it runs inline here.
+	 */
+	if (envp && current->pid != 1 && is_init(current_cred())) {
+#ifdef CONFIG_COMPAT
+		if (!envp->is_compat)
+#endif
+			ksu_handle_execveat_adb_root(filename->name,
+						   (unsigned long *)&envp->ptr.native,
+						   task_pt_regs(current)->sp);
 	}
 
 	if (unlikely(!memcmp(filename->name, system_bin_init,

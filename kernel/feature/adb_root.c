@@ -63,19 +63,19 @@ static long is_libadbroot_ok()
     return ret;
 }
 
-static long setup_ld_preload(struct pt_regs *regs, unsigned long *envp_p)
+static long setup_ld_preload(unsigned long *envp_slot, unsigned long sp)
 {
     static const char kLdPreload[] = "LD_PRELOAD=/data/adb/ksu/lib/libadbroot.so";
     static const char kLdLibraryPath[] = "LD_LIBRARY_PATH=/data/adb/ksu/lib";
     static const size_t kReadEnvBatch = 16;
     static const size_t kPtrSize = sizeof(unsigned long);
-    unsigned long stackp = user_stack_pointer(regs);
+    unsigned long stackp = sp;
     unsigned long envp, ld_preload_p, ld_library_path_p;
     unsigned long *tmp_env_p = NULL, *tmp_env_p2 = NULL;
     size_t env_count = 0, total_size;
     long ret;
 
-    envp = (char __user **)untagged_addr((unsigned long)*envp_p);
+    envp = (char __user **)untagged_addr(*envp_slot);
 
     ld_preload_p = stackp = ALIGN_DOWN(stackp - sizeof(kLdPreload), 8);
     ret = copy_to_user(ld_preload_p, kLdPreload, sizeof(kLdPreload));
@@ -145,7 +145,7 @@ static long setup_ld_preload(struct pt_regs *regs, unsigned long *envp_p)
         goto out_release_env_p;
     }
 
-    *envp_p = stackp;
+    *envp_slot = stackp;
     ret = 0;
 
 out_release_env_p:
@@ -168,7 +168,7 @@ static long do_ksu_adb_root_handle_execve(const char __user *filename_user,
         return 0;
     }
 
-    long ret = setup_ld_preload(regs, envp_p);
+    long ret = setup_ld_preload(envp_p, user_stack_pointer(regs));
     if (ret) {
         return ret;
     }
@@ -194,6 +194,52 @@ long ksu_adb_root_handle_execveat(struct pt_regs *regs)
         return do_ksu_adb_root_handle_execve(
                 (const char __user *)PT_REGS_PARM2(regs), regs,
                 (unsigned long *)&PT_REGS_SYSCALL_PARM4(regs));
+    }
+    return 0;
+}
+
+/*
+ * Manual-hook entry point. The kprobe and syscall-table paths both have a
+ * live struct pt_regs to work from, but the inline hook in
+ * ksu_handle_execveat_ksud() only has the resolved struct filename and the
+ * envp slot, so the env rewrite is split out to take those directly.
+ */
+static long do_ksu_adb_root_handle_execve_manual(const char *filename,
+                                                 unsigned long *envp_slot,
+                                                 unsigned long sp)
+{
+    static const char kAdbd[] = "/adbd";
+    static const size_t kAdbdLen = sizeof(kAdbd) - 1;
+    size_t len;
+
+    if (unlikely(!filename))
+        return 0;
+
+    len = strlen(filename);
+    if (len < kAdbdLen ||
+        memcmp(filename + len - kAdbdLen, kAdbd, kAdbdLen + 1) != 0) {
+        return 0;
+    }
+
+    if (unlikely(is_libadbroot_ok() != 1)) {
+        return 0;
+    }
+
+    long ret = setup_ld_preload(envp_slot, sp);
+    if (ret) {
+        return ret;
+    }
+
+    pr_info("escape to root for adb\n");
+    escape_to_root_for_adb_root();
+    return 0;
+}
+
+long ksu_handle_execveat_adb_root(const char *filename,
+                                  unsigned long *envp_slot, unsigned long sp)
+{
+    if (static_branch_unlikely(&ksu_adb_root)) {
+        return do_ksu_adb_root_handle_execve_manual(filename, envp_slot, sp);
     }
     return 0;
 }
