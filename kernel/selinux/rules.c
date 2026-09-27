@@ -196,6 +196,18 @@ static int apply_kernelsu_rules_fn(void *ptr)
     ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "getpgid");
     ksu_allow(db, "system_server", KERNEL_SU_DOMAIN, "process", "sigkill");
 
+#ifdef CONFIG_KSU_SUSFS
+    /*
+     * This has to run here rather than in apply_kernelsu_rules() after
+     * the unlock: it inserts into the live avtab, and avtab_insert_node()
+     * publishes the new node with a plain store and no barrier, so a
+     * concurrent avc_has_perm() reader on another CPU could observe the
+     * node before its key/datum were visible. Readers hold policy_rwlock
+     * for read, so being under the write lock here is what excludes them.
+     */
+    ksu_allow(db, "zygote", "labeledfs", "filesystem", "unmount");
+#endif
+
     return 0;
 }
 
@@ -281,10 +293,9 @@ out_flush:
 #endif
 
 #ifdef CONFIG_KSU_SUSFS
-	{
-		struct policydb *susfs_db = get_policydb();
-		ksu_allow(susfs_db, "zygote", "labeledfs", "filesystem", "unmount");
-	}
+	/* The zygote/labeledfs rule itself is applied under the write lock,
+	 * inside apply_kernelsu_rules_fn(). These only resolve SIDs, which
+	 * is a read of the now fully populated policy. */
 	susfs_set_init_sid();
 	susfs_set_ksu_sid();
 	susfs_set_zygote_sid();
