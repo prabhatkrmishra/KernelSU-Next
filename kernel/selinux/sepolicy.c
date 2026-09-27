@@ -732,7 +732,15 @@ out:
         }
     }
 
-    return ebitmap_set_bit(&db->filename_trans_ttypes, src->value - 1, 1) == 0;
+    /*
+     * The kernel skips filename_compute_type() entirely unless the
+     * *target* (parent dir) type has its bit set here - see
+     * filename_compute_type() in security/selinux/ss/services.c, and the
+     * kernel's own writer which uses ft->ttype with no -1 offset. Using
+     * src->value - 1 set a bit nothing ever reads, so the rule below was
+     * created but never reached.
+     */
+    return ebitmap_set_bit(&db->filename_trans_ttypes, tgt->value, 1) == 0;
 
 free_name_pre57:
     kfree(new_key->name);
