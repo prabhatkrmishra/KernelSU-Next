@@ -278,7 +278,9 @@ void __init ksu_app_profile_init(void)
 #endif
 }
 
-void ksu_escape_to_root(void)
+/* int to match fs/sus_su.c's extern: the FIFO call site discards it,
+ * but a shared header or -Wmissing-prototypes would reject a mismatch */
+int ksu_escape_to_root(void)
 {
-	escape_with_root_profile();
+	return escape_with_root_profile();
 }
